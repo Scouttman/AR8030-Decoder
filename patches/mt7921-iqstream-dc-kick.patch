@@ -1,0 +1,51 @@
+diff --git a/driver/mt7921/iqstream.c b/driver/mt7921/iqstream.c
+index bb6ae89..42d9fb9 100644
+--- a/driver/mt7921/iqstream.c
++++ b/driver/mt7921/iqstream.c
+@@ -154,6 +154,18 @@ MODULE_PARM_DESC(iq_fw_check, "Stream only on a patched I/Q WM firmware, version
+ #define IQ_RF_GAIN		0x768
+ #define IQ_RF_GAIN_MASK		GENMASK(31, 23)
+ #define IQ_RF_GAIN_HOLD(lna, lpf) (BIT(31) | (lna) << 27 | (lpf) << 23)
++/* Per-chain PHY word that, at its boot value (0x10347a21, set by ROM or
++ * calibration, never by the WM firmware), lets the receiver step its DC
++ * offset several times per AR8030 burst while the gain is held: a DC kick
++ * with a 10-20 us decay that garbles the OFDM symbol it lands in, at
++ * content-dependent places. 0 stops the kicks (4 -> 0 per
++ * ms at > 24x the DC noise) with no change in level or noise floor, and
++ * took the ramp blast from 11-35% to 97% CRC. Meaning of the fields unknown.
++ * Both chains must be zeroed even when one is streamed: zeroing either chain
++ * alone leaves the kicks on the streamed chain-0 data unchanged (4.7-4.9 per
++ * ms at LNA 4). Zeroed on both with any gain hold, restored on release.
++ */
++#define IQ_PHY_DCKICK(c)	(0x83000184 + ((c) << 16))
+ /* 80 MHz on 2.4 GHz. The vendor
+  * firmware has no 2.4 GHz BW80 channel, so the driver sets a 40 MHz channel
+  * and then writes the words in which a real 5 GHz BW80 channel differs from
+@@ -283,6 +295,7 @@ struct mt7921_iqs {
+ 	u32 gain_held;
+ 	u32 gain_lna, gain_lpf;	/* code last forced */
+ 	u32 gain_phy[IQ_GAIN_CHAINS], gain_rf[IQ_GAIN_CHAINS];	/* unforced words */
++	u32 gain_dckick[IQ_GAIN_CHAINS];	/* IQ_PHY_DCKICK before the hold */
+ 	u32 gain_errors;
+ 	/* 80 MHz on 2.4 GHz: graft applied, and the words it replaced (as for
+ 	 * the gain, kept across a release that could not reach the hardware).
+@@ -926,6 +939,7 @@ static int mt7921_iqs_gain_release(struct mt7921_iqs *iqs)
+ 	if (!iqs->gain_held)
+ 		return 0;
+ 	for (c = 0; c < IQ_GAIN_CHAINS; c++) {
++		mt76_wr(dev, IQ_PHY_DCKICK(c), iqs->gain_dckick[c]);
+ 		if (!(iqs->gain_held & BIT(c)))
+ 			continue;
+ 		mt76_wr(dev, IQ_PHY_RXGAIN(c), iqs->gain_phy[c]);
+@@ -1001,8 +1015,11 @@ static int mt7921_iqs_gain_hold(struct mt7921_iqs *iqs, u32 mask, u32 lna,
+ 		for (c = 0; c < IQ_GAIN_CHAINS; c++) {
+ 			iqs->gain_phy[c] = phy[c];
+ 			iqs->gain_rf[c] = rf[c];
++			iqs->gain_dckick[c] = mt76_rr(dev, IQ_PHY_DCKICK(c));
+ 		}
+ 		iqs->gain_held = mask;	/* release restores these from now on */
++		for (c = 0; c < IQ_GAIN_CHAINS; c++)	/* all chains, see above */
++			mt76_wr(dev, IQ_PHY_DCKICK(c), 0);
+ 	}
+ 	for (c = 0; c < IQ_GAIN_CHAINS; c++) {
+ 		if (!(mask & BIT(c)))
